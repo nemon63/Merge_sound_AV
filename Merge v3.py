@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QWidget, QTableWidget, QHBoxLayout, QTableWidgetItem,
     QMessageBox, QLabel, QProgressBar, QTreeView, QFileSystemModel,
     QSplitter, QMenu, QAction, QPlainTextEdit, QCheckBox, QSpinBox,
-    QListWidget, QListWidgetItem, QDialog, QTabWidget
+    QListWidget, QListWidgetItem, QDialog, QTabWidget, QLineEdit
 )
 from PyQt5.QtGui import QColor, QBrush, QFont, QCursor
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QDir, QTimer, QSortFilterProxyModel
@@ -832,6 +832,11 @@ class VideoAudioMerger(QMainWindow):
         self.log_view.setReadOnly(True)
         self.log_view.setFont(QFont('Consolas', 9))
 
+        # Адресная строка для проводника
+        self.address_bar = QLineEdit()
+        self.address_bar.setPlaceholderText("Введите путь к директории...")
+        self.address_bar.returnPressed.connect(self.on_address_bar_enter)
+
         # Дерево файлов
         self.directory_model = QFileSystemModel()
         self.directory_model.setRootPath(QDir.rootPath())
@@ -875,9 +880,16 @@ class VideoAudioMerger(QMainWindow):
         # Боковая панель с кнопками
         button_container = self.create_button_container()
 
+        # Создаем контейнер для проводника с адресной строкой
+        file_browser_container = QWidget()
+        file_browser_layout = QVBoxLayout()
+        file_browser_layout.addWidget(self.address_bar)
+        file_browser_layout.addWidget(self.tree_view)
+        file_browser_container.setLayout(file_browser_layout)
+
         # Главный разделитель
         main_splitter = QSplitter(Qt.Horizontal)
-        main_splitter.addWidget(self.tree_view)
+        main_splitter.addWidget(file_browser_container)
         main_splitter.addWidget(center_splitter)
         main_splitter.addWidget(button_container)
         main_splitter.setStretchFactor(1, 1)
@@ -950,7 +962,7 @@ class VideoAudioMerger(QMainWindow):
         container = QWidget()
         layout = QVBoxLayout()
         
-        # Добавляем все кнопки
+        # Добавляем все кнопки (убрали кнопку выбора входной директории, т.к. есть проводник)
         layout.addWidget(self.select_output_button)
         layout.addWidget(self.convert_button)
         layout.addWidget(self.delete_button)
@@ -1114,10 +1126,27 @@ class VideoAudioMerger(QMainWindow):
         else:
             subprocess.Popen(["xdg-open", path])
 
+    def on_address_bar_enter(self):
+        """Обработка ввода пути в адресной строке"""
+        path = self.address_bar.text()
+        if os.path.isdir(path):
+            self.directory = path
+            # Обновляем выделение в дереве
+            index = self.directory_model.index(path)
+            self.tree_view.setCurrentIndex(self.sort_filter_model.mapFromSource(index))
+            # Запускаем сканирование
+            self.start_scan(path)
+        else:
+            QMessageBox.warning(self, "Ошибка", f"Путь не существует или не является директорией: {path}")
+
     def select_directory_from_tree(self, index):
+        """Обработка выбора директории в дереве файлов"""
         source_index = self.sort_filter_model.mapToSource(index)
         directory = self.directory_model.filePath(source_index)
-        if directory:
+        if directory and os.path.isdir(directory):
+            # Обновляем адресную строку
+            self.address_bar.setText(directory)
+            # Запоминаем директорию и запускаем сканирование
             self.directory = directory
             self.start_scan(directory)
 
