@@ -1,3 +1,5 @@
+
+
 import sys
 import os
 import logging
@@ -5,16 +7,18 @@ import time
 import subprocess
 from pathlib import Path
 import concurrent.futures  # Для параллельного выполнения длительностей
+import json  # For handling JSON operations
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QFileDialog,
     QVBoxLayout, QWidget, QTableWidget, QHBoxLayout, QTableWidgetItem,
     QMessageBox, QLabel, QProgressBar, QTreeView, QFileSystemModel,
     QSplitter, QMenu, QAction, QPlainTextEdit, QCheckBox, QSpinBox,
-    QListWidget, QListWidgetItem, QDialog
+    QListWidget, QListWidgetItem, QDialog, QTabWidget, QLineEdit
 )
 from PyQt5.QtGui import QColor, QBrush, QFont, QCursor
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QDir, QTimer, QSortFilterProxyModel
+from PyQt5.QtChart import QChart, QChartView, QBarSet, QValueAxis, QBarSeries, QBarCategoryAxis  # Import QChart, QChartView, QBarSet, QValueAxis, QBarSeries, and QBarCategoryAxis
 
 from send2trash import send2trash
 from fuzzywuzzy import fuzz
@@ -30,9 +34,10 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-VIDEO_EXTS = [".flv", ".mp4", ".avi", ".mov", ".mkv", ".m4v", ".ts"]
-AUDIO_EXTS = [".mp3", ".wav", ".aac", ".flac", ".ogg", ".m4a"]
+VIDEO_EXTS = [".flv", ".mp4", ".avi", ".mov", ".mkv", ".m4v", ".ts", ".webm", ".mpeg", ".mpg", ".wmv"]
+AUDIO_EXTS = [".mp3", ".wav", ".aac", ".flac", ".ogg", ".m4a", ".opus", ".wma", ".aiff"]
 MKV_EXT = ".mkv"
+SUBTITLE_EXTS = ['.srt', '.ass', '.ssa', '.sub']
 
 def check_mkvmerge():
     try:
@@ -191,8 +196,168 @@ def run_cancellable(command, cancel_check, log_callback=None):
     _, err = proc.communicate()
     return proc.returncode, err.strip() if err else ""
 
+class StatsWindow(QDialog):
+    def __init__(self, file_data, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Статистика медиафайлов")
+        self.resize(800, 600)
+        
+        self.file_data = file_data  # Список словарей с метаданными файлов
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayout()
+        
+        # Вкладки
+        self.tab_widget = QTabWidget()
+        
+        # 1. График длительностей
+        self.duration_chart = QChart()
+        self.duration_view = QChartView(self.duration_chart)
+        self.tab_widget.addTab(self.duration_view, "Длительности")
+        
+        # 2. Распределение кодеков
+        self.codec_chart = QChart()
+        self.codec_view = QChartView(self.codec_chart)
+        self.tab_widget.addTab(self.codec_view, "Кодеки")
+        
+        # 3. Отчет по операциям
+        self.report_text = QPlainTextEdit()
+        self.report_text.setReadOnly(True)
+        self.tab_widget.addTab(self.report_text, "Отчет")
+        
+        layout.addWidget(self.tab_widget)
+        self.setLayout(layout)
+        
+        # Заполняем данные
+        self.update_stats()
+    
+    def update_stats(self):
+        self.show_duration_distribution()
+        self.show_codec_distribution()
+        self.generate_report()
+    
+    def show_duration_distribution(self):
+        durations = [f['duration'] for f in self.file_data if 'duration' in f and f['duration'] > 0]
+        if not durations:
+            self.report_text.appendPlainText("Нет данных о длительностях")
+            return
+            
+        series = QBarSeries()
+        bar_set = QBarSet("Длительность (сек)")
+        
+        # Группируем по диапазонам
+        max_dur = max(durations)
+        step = max(1, int(max_dur / 10))
+        bins = [0] * 10
+        
+        for dur in durations:
+            idx = min(int(dur / step), 9)
+            bins[idx] += 1
+            
+        bar_set.append(bins)
+        series.append(bar_set)
+        
+        chart = QChart()
+        chart.addSeries(series)
+        chart.setTitle("Распределение длительностей")
+        chart.setAnimationOptions(QChart.SeriesAnimations)
+        
+        axis_x = QBarCategoryAxis()
+        axis_x.append([f"{i*step}-{(i+1)*step}" for i in range(10)])
+        chart.addAxis(axis_x, Qt.AlignBottom)
+        series.attachAxis(axis_x)
+        
+        axis_y = QValueAxis()
+        chart.addAxis(axis_y, Qt.AlignLeft)
+        series.attachAxis(axis_y)
+        
+        self.duration_chart = chart
+        self.duration_view.setChart(chart)
+    
+    def show_codec_distribution(self):
+        # Собираем данные о кодеках
+        codecs = {}
+        for f in self.file_data:
+            if 'codec' in f:
+                codec = f['codec'] or 'unknown'
+                codecs[codec] = codecs.get(codec, 0) + 1
+        
+        if not codecs:
+            self.report_text.appendPlainText("Нет данных о кодеках")
+            return
+            
+        series = QBarSeries()
+        bar_set = QBarSet("Кодеки")
+        
+        # Сортируем по количеству
+        sorted_codecs = sorted(codecs.items(), key=lambda x: x[1], reverse=True)
+        codec_names = [codec[0] for codec in sorted_codecs]
+        codec_counts = [codec[1] for codec in sorted_codecs]
+        
+        bar_set.append(codec_counts)
+        series.append(bar_set)
+        
+        chart = QChart()
+        chart.addSeries(series)
+        chart.setTitle("Распределение кодеков")
+        chart.setAnimationOptions(QChart.SeriesAnimations)
+        
+        axis_x = QBarCategoryAxis()
+        axis_x.append(codec_names)
+        chart.addAxis(axis_x, Qt.AlignBottom)
+        series.attachAxis(axis_x)
+        
+        axis_y = QValueAxis()
+        chart.addAxis(axis_y, Qt.AlignLeft)
+        series.attachAxis(axis_y)
+        
+        self.codec_chart = chart
+        self.codec_view.setChart(chart)
+    
+    def generate_report(self):
+        """Генерация текстового отчета"""
+        report = []
+        
+        # Общая статистика
+        total_files = len(self.file_data)
+        video_files = sum(1 for f in self.file_data if f.get('codec') not in ['audio', None])
+        audio_files = total_files - video_files
+        
+        report.append(f"Всего файлов: {total_files}")
+        report.append(f"Видео файлов: {video_files}")
+        report.append(f"Аудио файлов: {audio_files}")
+        report.append("")
+        
+        # Статистика по длительностям
+        durations = [f['duration'] for f in self.file_data if 'duration' in f and f['duration'] > 0]
+        if durations:
+            avg_duration = sum(durations) / len(durations)
+            max_duration = max(durations)
+            min_duration = min(durations)
+            
+            report.append("Статистика длительностей:")
+            report.append(f"  Средняя: {format_duration(avg_duration)}")
+            report.append(f"  Максимальная: {format_duration(max_duration)}")
+            report.append(f"  Минимальная: {format_duration(min_duration)}")
+            report.append("")
+        
+        # Статистика по кодекам
+        codecs = {}
+        for f in self.file_data:
+            if 'codec' in f:
+                codec = f['codec'] or 'unknown'
+                codecs[codec] = codecs.get(codec, 0) + 1
+        
+        if codecs:
+            report.append("Используемые кодеки:")
+            for codec, count in sorted(codecs.items(), key=lambda x: x[1], reverse=True):
+                report.append(f"  {codec}: {count}")
+        
+        self.report_text.setPlainText("\n".join(report))
 
-# Диалог подтверждения удаления
+
+
 class DeleteConfirmDialog(QDialog):
     def __init__(self, file_list_text, parent=None):
         super().__init__(parent)
@@ -221,11 +386,19 @@ class ScanThread(QThread):
 
     def __init__(self, directory, check_duration, duration_tolerance, name_threshold):
         super().__init__()
+        self.metadata_cache = MetadataCache()
         self.directory = Path(directory)
         self.check_duration = check_duration
         self.duration_tolerance = duration_tolerance
         self.name_threshold = name_threshold
         self._is_cancelled = False
+        
+    def get_cached_duration(self, file_path):
+        """Пытаемся получить длительность из кэша"""
+        duration = self.metadata_cache.get_duration(file_path)
+        if duration > 0:
+            return duration
+        return get_media_duration_ffprobe(file_path)
 
     def cancel(self):
         self._is_cancelled = True
@@ -334,6 +507,41 @@ class ScanThread(QThread):
             durations_cache
         )
 
+class MetadataCache:
+    def __init__(self):
+        self.cache_file = Path.home() / ".video_merger_metadata_cache.json"
+        self.cache = self.load_cache()
+    
+    def load_cache(self):
+        try:
+            if self.cache_file.exists():
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logging.error(f"Ошибка загрузки кэша: {e}")
+        return {}
+    
+    def save_cache(self):
+        try:
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logging.error(f"Ошибка сохранения кэша: {e}")
+    
+    def get_duration(self, file_path):
+        """Получаем длительность из кэша или вычисляем"""
+        file_key = str(file_path)
+        if file_key in self.cache:
+            return self.cache[file_key].get('duration', -1)
+        return -1
+    
+    def update_cache(self, file_path, metadata):
+        """Обновляем кэш для файла"""
+        self.cache[str(file_path)] = metadata
+        self.save_cache()
+
+
+
 # Поток конвертации
 class ConvertThread(QThread):
     update_progress = pyqtSignal(int)       # прогресс общего числа файлов
@@ -351,6 +559,19 @@ class ConvertThread(QThread):
 
     def is_cancelled(self):
         return self._is_cancelled
+    
+    def process_existing_mkv(self, mkv_file, audio_file, output_file):
+        """Добавляем аудиодорожку в существующий MKV"""
+        mkvmerge_cmd = [
+            "mkvmerge", "--ui-language", "ru",
+            "--output", str(output_file),
+            str(mkv_file),
+            "--language", "0:rus", "--default-track", "0:yes",
+            "(", str(audio_file), ")"
+        ]
+        ret, err = run_cancellable(mkvmerge_cmd, self.is_cancelled, self.log_signal.emit)
+        return ret == 0
+    
 
     def run(self):
         total_files = len(self.matched_files)
@@ -361,6 +582,12 @@ class ConvertThread(QThread):
             if self._is_cancelled:
                 self.log_signal.emit("Конвертация отменена пользователем.")
                 break
+            if video.suffix.lower() == ".mkv":
+                output_file = video.parent / (video.stem + "_with_rus_audio.mkv")
+                success = self.process_existing_mkv(video, audio, output_file)
+                if success:
+                    self.log_signal.emit(f"Аудио добавлено в существующий MKV: {output_file.name}")
+                continue            
 
             if audio is None:
                 self.log_signal.emit(f"Файл {video.name} без аудио - пропускаем.")
@@ -459,6 +686,50 @@ class ConvertThread(QThread):
             self.log_signal.emit("Конвертация прервана пользователем.")
         else:
             self.log_signal.emit("Все файлы успешно обработаны.")
+    def find_subtitles(self, video_path):
+        """Ищем субтитры для видеофайла"""
+        subs = []
+        for ext in SUBTITLE_EXTS:
+            sub_file = video_path.with_suffix(ext)
+            if sub_file.exists():
+                subs.append(sub_file)
+                
+            # Также ищем файлы с похожими именами
+            for f in video_path.parent.glob(f"{video_path.stem}*{ext}"):
+                if f not in subs:
+                    subs.append(f)
+        return subs
+    
+    def build_mkvmerge_command(self, video, audio, output_file):
+        """Строим команду mkvmerge с учетом субтитров"""
+        cmd = [
+            "mkvmerge", "--ui-language", "ru",
+            "--output", str(output_file),
+            "--language", "0:und", "(", str(video), ")",
+            "--language", "0:rus", "--default-track", "0:yes", "(", str(audio), ")"
+        ]
+        
+        # Добавляем субтитры
+        for i, sub in enumerate(self.find_subtitles(video)):
+            lang = self.detect_language(sub.stem)
+            cmd.extend([
+                "--language", f"0:{lang}",
+                "--default-track", "0:no",
+                "(", str(sub), ")"
+            ])
+        
+        cmd.append("--track-order")
+        cmd.append("0:0,0:1,1:0")
+        return cmd
+    
+    def detect_language(self, filename):
+        """Определяем язык по имени файла"""
+        filename = filename.lower()
+        if 'rus' in filename or 'ru' in filename:
+            return 'rus'
+        elif 'eng' in filename or 'en' in filename:
+            return 'eng'
+        return 'und'            
 
 # Логгер в QPlainTextEdit
 class QTextEditLogger(logging.Handler):
@@ -485,18 +756,42 @@ class VideoAudioMerger(QMainWindow):
                 "Утилита mkvmerge не найдена!\nУстановите MKVToolNix: https://mkvtoolnix.download/"
             )
 
+        # Инициализация переменных
+        self.matched_files = []
+        self.converted_files = []
+        self.all_mkv_files = []
+        self.file_durations = {}
+        self.directory = None
+        self.output_directory = None
+        self.scan_thread = None
+        self.convert_thread = None
+        self.metadata_cache = MetadataCache()
+
+        # Создание UI компонентов
+        self.create_ui_components()
+        
+        # Настройка компоновки
+        self.setup_layout()
+        
+        # Настройка DnD и других функций
+        self.setup_drag_drop()
+        
+        # Логгер
+        self.setup_logger()
+
+        logging.info("Программа запущена — сопоставление видео/аудио только в одной папке.")
+
+    def create_ui_components(self):
+        """Создание всех компонентов UI"""
         # Кнопки
         self.select_output_button = QPushButton("Выбрать выходную директорию")
-        self.select_output_button.clicked.connect(self.select_output_directory)
         self.convert_button = QPushButton("Сконвертировать в .mkv")
-        self.convert_button.clicked.connect(self.convert_files)
         self.delete_button = QPushButton("Удалить исходные файлы")
-        self.delete_button.clicked.connect(self.delete_source_files_button)
         self.cancel_button = QPushButton("Отмена")
-        self.cancel_button.clicked.connect(self.cancel_current_operation)
         self.cancel_button.setEnabled(False)
+        self.stats_button = QPushButton("Показать статистику")
 
-        # Опции сопоставления
+        # Виджеты настроек
         self.duration_check_box = QCheckBox("Проверять длительность (медленнее)")
         self.duration_check_box.setChecked(False)
         self.duration_spin = QSpinBox()
@@ -508,39 +803,25 @@ class VideoAudioMerger(QMainWindow):
         self.name_threshold_spin.setValue(85)
         self.name_threshold_spin.setSuffix(" %")
 
-        top_layout = QHBoxLayout()
-        top_layout.addWidget(QLabel("Имя ≥"))
-        top_layout.addWidget(self.name_threshold_spin)
-        top_layout.addWidget(self.duration_check_box)
-        top_layout.addWidget(QLabel("Допуск времени:"))
-        top_layout.addWidget(self.duration_spin)
-        top_layout.addStretch(1)
-        top_widget = QWidget()
-        top_widget.setLayout(top_layout)
-
         # Таблица сопоставлений
         self.match_table = QTableWidget()
         self.match_table.setColumnCount(5)
-        self.match_table.setHorizontalHeaderLabels(["Видео", "Аудио", "Длительность видео", "Длительность аудио", "Статус"])
-        self.match_table.horizontalHeader().setStretchLastSection(True)
-        self.match_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.match_table.customContextMenuRequested.connect(self.open_match_context_menu)
+        self.match_table.setHorizontalHeaderLabels([
+            "Видео", "Аудио", "Длительность видео", "Длительность аудио", "Статус"
+        ])
 
-        # Список сконвертированных
+        # Список конвертированных файлов
         self.converted_list = QListWidget()
         self.converted_list.setSelectionMode(QListWidget.ExtendedSelection)
-        self.converted_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.converted_list.customContextMenuRequested.connect(self.open_converted_context_menu)
-        self.converted_list.itemDoubleClicked.connect(self.open_converted_file)
 
-        # Статистика
+        # Элементы статистики
         self.video_count_label = QLabel("Исходных видео файлов: 0")
         self.audio_count_label = QLabel("Исходных аудио файлов: 0")
         self.converted_count_label = QLabel("Сконвертированных файлов: 0")
         self.matched_count_label = QLabel("Сопоставленных пар: 0")
         self.converted_match_count_label = QLabel("Совпадений конвертированных файлов: 0")
 
-        # Прогресс
+        # Прогресс-бары
         self.file_progress_label = QLabel("Прогресс текущего файла:")
         self.file_progress_bar = QProgressBar()
         self.overall_progress_label = QLabel("Общий прогресс:")
@@ -551,18 +832,169 @@ class VideoAudioMerger(QMainWindow):
         self.log_view.setReadOnly(True)
         self.log_view.setFont(QFont('Consolas', 9))
 
+        # Адресная строка для проводника
+        self.address_bar = QLineEdit()
+        self.address_bar.setPlaceholderText("Введите путь к директории...")
+        self.address_bar.returnPressed.connect(self.on_address_bar_enter)
+
         # Дерево файлов
         self.directory_model = QFileSystemModel()
         self.directory_model.setRootPath(QDir.rootPath())
         self.directory_model.setFilter(QDir.NoDotAndDotDot | QDir.AllDirs | QDir.AllEntries)
-        self.directory_model.setReadOnly(False)
-
         self.sort_filter_model = QSortFilterProxyModel()
         self.sort_filter_model.setSourceModel(self.directory_model)
-        self.sort_filter_model.setSortCaseSensitivity(Qt.CaseInsensitive)
-
+        
         self.tree_view = QTreeView()
         self.tree_view.setModel(self.sort_filter_model)
+
+    def setup_layout(self):
+        """Настройка компоновки интерфейса"""
+        # Верхняя панель с настройками
+        top_layout = QHBoxLayout()
+        top_layout.addWidget(QLabel("Имя ≥"))
+        top_layout.addWidget(self.name_threshold_spin)
+        top_layout.addWidget(self.duration_check_box)
+        top_layout.addWidget(QLabel("Допуск времени:"))
+        top_layout.addWidget(self.duration_spin)
+        top_layout.addStretch(1)
+        
+        top_widget = QWidget()
+        top_widget.setLayout(top_layout)
+
+        # Основные контейнеры
+        match_container = self.create_match_container()
+        converted_container = self.create_converted_container()
+        stats_container = self.create_stats_container()
+        progress_container = self.create_progress_container()
+        logs_container = self.create_logs_container()
+
+        # Центральный разделитель
+        center_splitter = QSplitter(Qt.Vertical)
+        center_splitter.addWidget(top_widget)
+        center_splitter.addWidget(match_container)
+        center_splitter.addWidget(converted_container)
+        center_splitter.addWidget(stats_container)
+        center_splitter.addWidget(progress_container)
+        center_splitter.addWidget(logs_container)
+
+        # Боковая панель с кнопками
+        button_container = self.create_button_container()
+
+        # Создаем контейнер для проводника с адресной строкой
+        file_browser_container = QWidget()
+        file_browser_layout = QVBoxLayout()
+        file_browser_layout.addWidget(self.address_bar)
+        file_browser_layout.addWidget(self.tree_view)
+        file_browser_container.setLayout(file_browser_layout)
+
+        # Главный разделитель
+        main_splitter = QSplitter(Qt.Horizontal)
+        main_splitter.addWidget(file_browser_container)
+        main_splitter.addWidget(center_splitter)
+        main_splitter.addWidget(button_container)
+        main_splitter.setStretchFactor(1, 1)
+
+        # Главный контейнер
+        main_container = QWidget()
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(main_splitter)
+        main_container.setLayout(main_layout)
+        self.setCentralWidget(main_container)
+
+    def create_match_container(self):
+        """Контейнер для таблицы сопоставлений"""
+        container = QWidget()
+        layout = QVBoxLayout()
+        self.match_table.horizontalHeader().setStretchLastSection(True)
+        self.match_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.match_table.customContextMenuRequested.connect(self.open_match_context_menu)
+        layout.addWidget(QLabel("Сопоставленные файлы (только в одной папке)"))
+        layout.addWidget(self.match_table)
+        container.setLayout(layout)
+        return container
+
+    def create_converted_container(self):
+        """Контейнер для списка конвертированных файлов"""
+        container = QWidget()
+        layout = QVBoxLayout()
+        self.converted_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.converted_list.customContextMenuRequested.connect(self.open_converted_context_menu)
+        self.converted_list.itemDoubleClicked.connect(self.open_converted_file)
+        layout.addWidget(QLabel("Конвертированные файлы"))
+        layout.addWidget(self.converted_list)
+        container.setLayout(layout)
+        return container
+
+    def create_stats_container(self):
+        """Контейнер для статистики"""
+        container = QWidget()
+        layout = QVBoxLayout()
+        layout.addWidget(self.video_count_label)
+        layout.addWidget(self.audio_count_label)
+        layout.addWidget(self.converted_count_label)
+        layout.addWidget(self.matched_count_label)
+        layout.addWidget(self.converted_match_count_label)
+        container.setLayout(layout)
+        return container
+
+    def create_progress_container(self):
+        """Контейнер для прогресс-баров"""
+        container = QWidget()
+        layout = QVBoxLayout()
+        layout.addWidget(self.file_progress_label)
+        layout.addWidget(self.file_progress_bar)
+        layout.addWidget(self.overall_progress_label)
+        layout.addWidget(self.progress_bar)
+        container.setLayout(layout)
+        return container
+
+    def create_logs_container(self):
+        """Контейнер для логов"""
+        container = QWidget()
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Логи:"))
+        layout.addWidget(self.log_view)
+        container.setLayout(layout)
+        return container
+
+    def create_button_container(self):
+        """Контейнер для кнопок управления"""
+        container = QWidget()
+        layout = QVBoxLayout()
+        
+        # Добавляем все кнопки (убрали кнопку выбора входной директории, т.к. есть проводник)
+        layout.addWidget(self.select_output_button)
+        layout.addWidget(self.convert_button)
+        layout.addWidget(self.delete_button)
+        layout.addWidget(self.cancel_button)
+        layout.addWidget(self.stats_button)
+        layout.addStretch(1)
+        
+        # Устанавливаем соединения
+        self.select_output_button.clicked.connect(self.select_output_directory)
+        self.convert_button.clicked.connect(self.convert_files)
+        self.delete_button.clicked.connect(self.delete_source_files_button)
+        self.cancel_button.clicked.connect(self.cancel_current_operation)
+        self.stats_button.clicked.connect(self.show_stats)
+        
+        container.setLayout(layout)
+        return container
+
+
+
+
+
+
+
+
+
+
+    def setup_drag_drop(self):
+        """Настройка системы Drag and Drop"""
+        self.setAcceptDrops(True)
+        self.match_table.setAcceptDrops(True)
+        self.match_table.setDragEnabled(True)
+        self.match_table.setDropIndicatorShown(True)
         self.tree_view.setRootIsDecorated(True)
         self.tree_view.setHeaderHidden(False)
         self.tree_view.setColumnWidth(0, 250)
@@ -575,90 +1007,114 @@ class VideoAudioMerger(QMainWindow):
         self.tree_view.clicked.connect(self.select_directory_from_tree)
         self.tree_view.doubleClicked.connect(self.on_tree_double_click)
 
-        # Вертикальный контейнер для «матчей», «сконвертированных», статистики и логов
-        match_container = QWidget()
-        match_layout = QVBoxLayout()
-        match_layout.addWidget(QLabel("Сопоставленные файлы (только в одной папке)"))
-        match_layout.addWidget(self.match_table)
-        match_container.setLayout(match_layout)
-
-        converted_container = QWidget()
-        conv_layout = QVBoxLayout()
-        conv_layout.addWidget(QLabel("Конвертированные файлы"))
-        conv_layout.addWidget(self.converted_list)
-        converted_container.setLayout(conv_layout)
-
-        stats_container = QWidget()
-        stats_layout = QVBoxLayout()
-        stats_layout.addWidget(self.video_count_label)
-        stats_layout.addWidget(self.audio_count_label)
-        stats_layout.addWidget(self.converted_count_label)
-        stats_layout.addWidget(self.matched_count_label)
-        stats_layout.addWidget(self.converted_match_count_label)
-        stats_container.setLayout(stats_layout)
-
-        progress_container = QWidget()
-        progress_layout = QVBoxLayout()
-        progress_layout.addWidget(self.file_progress_label)
-        progress_layout.addWidget(self.file_progress_bar)
-        progress_layout.addWidget(self.overall_progress_label)
-        progress_layout.addWidget(self.progress_bar)
-        progress_container.setLayout(progress_layout)
-
-        logs_container = QWidget()
-        logs_layout = QVBoxLayout()
-        logs_layout.addWidget(QLabel("Логи:"))
-        logs_layout.addWidget(self.log_view)
-        logs_container.setLayout(logs_layout)
-
-        center_splitter = QSplitter(Qt.Vertical)
-        center_splitter.addWidget(top_widget)
-        center_splitter.addWidget(match_container)
-        center_splitter.addWidget(converted_container)
-        center_splitter.addWidget(stats_container)
-        center_splitter.addWidget(progress_container)
-        center_splitter.addWidget(logs_container)
-
-        # Боковая панель с кнопками
-        button_container = QWidget()
-        button_layout = QVBoxLayout()
-        button_layout.addWidget(self.select_output_button)
-        button_layout.addWidget(self.convert_button)
-        button_layout.addWidget(self.delete_button)
-        button_layout.addWidget(self.cancel_button)
-        button_layout.addStretch(1)
-        button_container.setLayout(button_layout)
-
-        # Горизонтальный splitter
-        main_splitter = QSplitter(Qt.Horizontal)
-        main_splitter.addWidget(self.tree_view)
-        main_splitter.addWidget(center_splitter)
-        main_splitter.addWidget(button_container)
-        main_splitter.setStretchFactor(1, 1)
-
-        main_container = QWidget()
-        main_layout = QHBoxLayout()
-        main_layout.addWidget(main_splitter)
-        main_container.setLayout(main_layout)
-        self.setCentralWidget(main_container)
-
-        # Внутренние переменные
-        self.matched_files = []
-        self.converted_files = []
-        self.all_mkv_files = []
-        self.file_durations = {}
-        self.directory = None
-        self.output_directory = None
-
-        # Логгер для QPlainTextEdit
+    def setup_logger(self):
+        """Настройка системы логирования"""
         self.logger_handler = QTextEditLogger(self.log_view)
         self.logger_handler.setLevel(logging.INFO)
         logging.getLogger().addHandler(self.logger_handler)
 
-        logging.info("Программа запущена — сопоставление видео/аудио только в одной папке.")
-        self.scan_thread = None
-        self.convert_thread = None
+    def show_stats(self):
+        """Показать окно статистики"""
+        # Подготавливаем данные для статистики
+        file_data = []
+        for video, audio, *_ in self.matched_files:
+            file_data.append({
+                'path': str(video),
+                'duration': self.file_durations.get(video, -1),
+                'codec': get_video_codec(video)
+            })
+            if audio:
+                file_data.append({
+                    'path': str(audio),
+                    'duration': self.file_durations.get(audio, -1),
+                    'codec': "audio"
+                })
+        
+        stats_window = StatsWindow(file_data, self)
+        stats_window.exec_()
+        
+        
+    # Добавим методы для DnD
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
 
+    def dropEvent(self, event):
+        files = [Path(url.toLocalFile()) for url in event.mimeData().urls()]
+        self.manual_match_files(files)
+
+    def manual_match_files(self, files):
+        """Ручное сопоставление файлов"""
+        videos = [f for f in files if f.suffix.lower() in VIDEO_EXTS]
+        audios = [f for f in files if f.suffix.lower() in AUDIO_EXTS]
+        
+        if not videos or not audios:
+            QMessageBox.warning(self, "Ошибка", "Не найдено подходящих видео/аудио файлов")
+            return
+            
+        # Простое сопоставление по порядку (можно улучшить)
+        for video, audio in zip(videos, audios):
+            self.add_manual_match(video, audio)
+
+    def add_manual_match(self, video, audio):
+        """Добавляем ручное сопоставление в таблицу"""
+        row = self.match_table.rowCount()
+        self.match_table.insertRow(row)
+
+        # Получаем длительности из кэша или вычисляем
+        v_dur = self.metadata_cache.get_duration(video) or get_media_duration_ffprobe(video)
+        a_dur = self.metadata_cache.get_duration(audio) or get_media_duration_ffprobe(audio)
+
+        # Создаем элементы таблицы
+        item_video = QTableWidgetItem(video.name)
+        item_audio = QTableWidgetItem(audio.name)
+        item_video_duration = QTableWidgetItem(format_duration(v_dur))
+        item_audio_duration = QTableWidgetItem(format_duration(a_dur))
+
+        # Сохраняем полные пути в UserRole
+        item_video.setData(Qt.UserRole, video)
+        item_audio.setData(Qt.UserRole, audio)
+
+        # Определяем статус
+        if v_dur > 0 and a_dur > 0:
+            if abs(v_dur - a_dur) > 1:
+                status = "Проверить (разница длительностей)"
+                item_audio_duration.setBackground(QBrush(QColor('yellow')))
+            else:
+                status = "OK (ручное сопоставление)"
+        else:
+            status = "Нет данных о длительности"
+
+        item_status = QTableWidgetItem(status)
+        item_status.setBackground(QBrush(QColor(200, 255, 200)))  # Светло-зеленый для ручных
+
+        # Заполняем строку таблицы
+        self.match_table.setItem(row, 0, item_video)
+        self.match_table.setItem(row, 1, item_audio)
+        self.match_table.setItem(row, 2, item_video_duration)
+        self.match_table.setItem(row, 3, item_audio_duration)
+        self.match_table.setItem(row, 4, item_status)
+
+        # Добавляем в список сопоставленных файлов с флагом manual=True
+        self.matched_files.append((video, audio, True))  # True - manual match
+
+        # Обновляем счетчики
+        self.update_counters()
+
+        logging.info(f"Добавлено ручное сопоставление: {video.name} + {audio.name}")
+        
+        
+    def update_counters(self):
+        """Обновляем счетчики в интерфейсе"""
+        manual_count = sum(1 for m in self.matched_files if len(m) > 2 and m[2])
+        auto_count = len(self.matched_files) - manual_count
+
+        self.matched_count_label.setText(
+            f"Сопоставленных пар: {len(self.matched_files)} "
+            f"(авто: {auto_count}, ручн.: {manual_count})"
+        )
+        
+        
     # Открыть файл/папку по двойному клику в дереве
     def on_tree_double_click(self, index):
         source_index = self.sort_filter_model.mapToSource(index)
@@ -670,10 +1126,27 @@ class VideoAudioMerger(QMainWindow):
         else:
             subprocess.Popen(["xdg-open", path])
 
+    def on_address_bar_enter(self):
+        """Обработка ввода пути в адресной строке"""
+        path = self.address_bar.text()
+        if os.path.isdir(path):
+            self.directory = path
+            # Обновляем выделение в дереве
+            index = self.directory_model.index(path)
+            self.tree_view.setCurrentIndex(self.sort_filter_model.mapFromSource(index))
+            # Запускаем сканирование
+            self.start_scan(path)
+        else:
+            QMessageBox.warning(self, "Ошибка", f"Путь не существует или не является директорией: {path}")
+
     def select_directory_from_tree(self, index):
+        """Обработка выбора директории в дереве файлов"""
         source_index = self.sort_filter_model.mapToSource(index)
         directory = self.directory_model.filePath(source_index)
-        if directory:
+        if directory and os.path.isdir(directory):
+            # Обновляем адресную строку
+            self.address_bar.setText(directory)
+            # Запоминаем директорию и запускаем сканирование
             self.directory = directory
             self.start_scan(directory)
 
